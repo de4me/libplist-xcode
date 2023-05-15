@@ -63,4 +63,5 @@ cython/.libs
 cython/plist.c
 test-driver
 .DS_Store
+xcuserdata/
 
