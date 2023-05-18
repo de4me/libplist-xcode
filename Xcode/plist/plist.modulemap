@@ -1,0 +1,10 @@
+
+framework module plist [system] [extern_c] {
+
+  umbrella header "plist.h"
+
+  export *
+  module * { export * }
+
+}
+
