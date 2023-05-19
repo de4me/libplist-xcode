@@ -136,7 +136,7 @@ class ConvertOperation: Operation {
                 guard let bytes = pointer.baseAddress?.bindMemory(to: CChar.self, capacity: pointer.count) else {
                     throw PlistError.unknown;
                 }
-                let error = plist_from_memory(bytes, UInt32(data.count), &plist, nil);
+                let error = plist_from_memory(bytes, UInt32(pointer.count), &plist, nil);
                 guard error == PLIST_ERR_SUCCESS else {
                     throw PlistError(rawValue: error);
                 }
