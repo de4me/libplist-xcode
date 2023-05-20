@@ -23,7 +23,7 @@ class vMainViewController: NSViewController {
     
     @objc var formatValue: String {
         set {
-            guard let format = PlistFormat(name: newValue) else {
+            guard let format = PlistFormat(description: newValue) else {
                 return;
             }
             self.outputFormat = format;

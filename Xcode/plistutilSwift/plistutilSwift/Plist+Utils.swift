@@ -17,8 +17,8 @@ enum PlistFormat: CaseIterable {
 }
 
 extension PlistFormat {
-    init?(name: String) {
-        if let format = PlistFormat.allCases.first(where: {$0.description == name;} ) {
+    init?(description: String) {
+        if let format = PlistFormat.allCases.first(where: {$0.description == description;} ) {
             self = format;
         } else {
             return nil;
