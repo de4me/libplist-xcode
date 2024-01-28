@@ -718,7 +718,7 @@ cdef class Dict(Node):
 
     def __delitem__(self, key):
         cpython.PyDict_DelItem(self._map, key)
-        plist_dict_remove_item(self._c_node, key)
+        plist_dict_remove_item(self._c_node, key.encode('utf-8'))
 
 cdef Dict Dict_factory(plist_t c_node, bint managed=True):
     cdef Dict instance = Dict.__new__(Dict)
@@ -977,8 +977,10 @@ cpdef object dumps(value, fmt=FMT_XML, sort_keys=True, skipkeys=False):
         node = Dict(value)
     elif type(value) in (list, set, tuple):
         node = Array(value)
+    else:
+        node = value
 
     if fmt == FMT_XML:
-        return node.to_xml()
+        return node.to_xml().encode('utf-8')
 
     return node.to_bin()

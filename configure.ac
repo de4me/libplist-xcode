@@ -129,7 +129,7 @@ AC_CACHE_CHECK(for tm_zone in struct tm, ac_cv_struct_tm_zone,
       #include <time.h>
     ], [
       struct tm tm;
-      tm.tm_zone = 1;
+      tm.tm_zone = (char*)"UTC";
     ])],
     [ac_cv_struct_tm_zone=yes],
     [ac_cv_struct_tm_zone=no]
@@ -147,9 +147,10 @@ AC_ARG_WITH([cython],
             [build_cython=false],
             [build_cython=true])
 if test "$build_cython" = "true"; then
-            AM_PATH_PYTHON(2.3)
-            AC_PROG_CYTHON(0.17.0)
-            CYTHON_PYTHON
+            AC_PROG_CYTHON([0.17.0])
+            if [test "x$CYTHON" != "xfalse"]; then
+              AM_PATH_PYTHON([2.3], [CYTHON_PYTHON])
+            fi
 else
             CYTHON=false
 fi
