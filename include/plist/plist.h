@@ -75,17 +75,11 @@ extern "C"
 #endif
 /*}}}*/
 
-#ifdef LIBPLIST_STATIC
-  #define PLIST_API
-#elif defined(_WIN32)
-  #ifdef DLL_EXPORT
-    #define PLIST_API __declspec(dllexport)
-  #else
+#ifndef PLIST_API
+  #ifdef LIBPLIST_STATIC
+    #define PLIST_API
+  #elif defined(_WIN32)
     #define PLIST_API __declspec(dllimport)
-  #endif
-#else
-  #if __GNUC__ >= 4
-    #define PLIST_API __attribute__((visibility("default")))
   #else
     #define PLIST_API
   #endif
@@ -96,7 +90,7 @@ extern "C"
 #include <stdio.h>
 
     /**
-     * \mainpage libplist : A library to handle Apple Property Lists
+     * libplist : A library to handle Apple Property Lists
      * \defgroup PublicAPI Public libplist API
      */
     /*@{*/
@@ -1220,6 +1214,13 @@ extern "C"
      * @param debug Debug level. Currently, only 0 (off) and 1 (enabled) are supported.
      */
     PLIST_API void plist_set_debug(int debug);
+
+    /**
+     * Returns a static string of the libplist version.
+     *
+     * @return The libplist version as static ascii string
+     */
+    PLIST_API const char* libplist_version();
 
     /*@}*/
 
