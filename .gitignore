@@ -64,4 +64,4 @@ cython/plist.c
 test-driver
 .DS_Store
 xcuserdata/
-
+!Xcode/plist/Include/config.h
