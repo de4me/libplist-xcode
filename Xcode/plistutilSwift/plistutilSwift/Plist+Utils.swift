@@ -101,7 +101,7 @@ extension PlistError: Equatable {
 }
 
 
-class ConvertOperation: Operation {
+class ConvertOperation: Operation, @unchecked Sendable {
     
     private static let convertQueue = OperationQueue();
     
