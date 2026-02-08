@@ -210,7 +210,7 @@ void* memmem(const void* haystack, size_t haystack_len, const void* needle, size
 
 int plist_is_binary(const char *plist_data, uint32_t length)
 {
-    if (length < 8) {
+    if (plist_data == NULL || length < 8) {
         return 0;
     }
 
@@ -515,8 +515,10 @@ plist_t plist_new_data(const char *val, uint64_t length)
 {
     plist_data_t data = plist_new_plist_data();
     data->type = PLIST_DATA;
+if (val && length) {
     data->buff = (uint8_t *) malloc(length);
     memcpy(data->buff, val, length);
+}
     data->length = length;
     return plist_new_node(data);
 }
@@ -579,12 +581,27 @@ static plist_t plist_copy_node(node_t node)
     node_type = plist_get_node_type(node);
     switch (node_type) {
         case PLIST_DATA:
-            newdata->buff = (uint8_t *) malloc(data->length);
-            memcpy(newdata->buff, data->buff, data->length);
+            if (data->buff) {
+                newdata->buff = (uint8_t *) malloc(data->length);
+                assert(newdata->buff);
+                memcpy(newdata->buff, data->buff, data->length);
+            } else {
+                newdata->buff = NULL;
+                newdata->length = 0;
+            }
             break;
         case PLIST_KEY:
         case PLIST_STRING:
-            newdata->strval = strdup(data->strval);
+            if (data->strval) {
+                size_t n = strlen(data->strval);
+                newdata->strval = (char*)malloc(n+1);
+                assert(newdata->strval);
+                memcpy(newdata->strval, data->strval, n+1);
+                newdata->length = (uint64_t)n;
+            } else {
+                newdata->strval = NULL;
+                newdata->length = 0;
+            }
             break;
         case PLIST_ARRAY:
             if (data->hashtable) {
@@ -696,50 +713,62 @@ static void _plist_array_post_insert(plist_t node, plist_t item, long n)
 
 void plist_array_set_item(plist_t node, plist_t item, uint32_t n)
 {
-    if (!item) {
+    if (!PLIST_IS_ARRAY(node) || !item || n >= INT_MAX) {
+        PLIST_ERR("invalid argument passed to %s (node=%p, item=%p, n=%u)\n", __func__, node, item, n);
         return;
     }
-    if (node && PLIST_ARRAY == plist_get_node_type(node) && n < INT_MAX)
+    node_t it = (node_t)item;
+    if (it->parent != NULL) {
+        assert(it->parent == NULL && "item already has a parent; use plist_copy() or detach first");
+        PLIST_ERR("%s: item already has a parent; use plist_copy() or detach first\n", __func__);
+        return;
+    }
+    plist_t old_item = plist_array_get_item(node, n);
+    if (old_item)
     {
-        plist_t old_item = plist_array_get_item(node, n);
-        if (old_item)
-        {
-            int idx = plist_free_node((node_t)old_item);
-            assert(idx >= 0);
-            if (idx < 0) {
-                return;
-            }
-            node_insert((node_t)node, idx, (node_t)item);
-            ptrarray_t* pa = (ptrarray_t*)((plist_data_t)((node_t)node)->data)->hashtable;
-            if (pa) {
-                ptr_array_set(pa, item, idx);
-            }
+        int idx = plist_free_node((node_t)old_item);
+        assert(idx >= 0);
+        if (idx < 0) {
+            return;
+        }
+        node_insert((node_t)node, idx, (node_t)item);
+        ptrarray_t* pa = (ptrarray_t*)((plist_data_t)((node_t)node)->data)->hashtable;
+        if (pa) {
+            ptr_array_set(pa, item, idx);
         }
     }
 }
 
 void plist_array_append_item(plist_t node, plist_t item)
 {
-    if (!item) {
+    if (!PLIST_IS_ARRAY(node) || !item) {
+        PLIST_ERR("invalid argument passed to %s (node=%p, item=%p)\n", __func__, node, item);
         return;
     }
-    if (node && PLIST_ARRAY == plist_get_node_type(node))
-    {
-        node_attach((node_t)node, (node_t)item);
-        _plist_array_post_insert(node, item, -1);
+    node_t it = (node_t)item;
+    if (it->parent != NULL) {
+        assert(it->parent == NULL && "item already has a parent; use plist_copy() or detach first");
+        PLIST_ERR("%s: item already has a parent; use plist_copy() or detach first\n", __func__);
+        return;
     }
+    node_attach((node_t)node, (node_t)item);
+    _plist_array_post_insert(node, item, -1);
 }
 
 void plist_array_insert_item(plist_t node, plist_t item, uint32_t n)
 {
-    if (!item) {
+    if (!PLIST_IS_ARRAY(node) || !item || n >= INT_MAX) {
+        PLIST_ERR("invalid argument passed to %s (node=%p, item=%p, n=%u)\n", __func__, node, item, n);
         return;
     }
-    if (node && PLIST_ARRAY == plist_get_node_type(node) && n < INT_MAX)
-    {
-        node_insert((node_t)node, n, (node_t)item);
-        _plist_array_post_insert(node, item, (long)n);
+    node_t it = (node_t)item;
+    if (it->parent != NULL) {
+        assert(it->parent == NULL && "item already has a parent; use plist_copy() or detach first");
+        PLIST_ERR("%s: item already has a parent; use plist_copy() or detach first\n", __func__);
+        return;
     }
+    node_insert((node_t)node, n, (node_t)item);
+    _plist_array_post_insert(node, item, (long)n);
 }
 
 void plist_array_remove_item(plist_t node, uint32_t n)
@@ -871,31 +900,39 @@ plist_t plist_dict_item_get_key(plist_t node)
 plist_t plist_dict_get_item(plist_t node, const char* key)
 {
     plist_t ret = NULL;
-
-    if (node && PLIST_DICT == plist_get_node_type(node))
-    {
-        plist_data_t data = plist_get_data(node);
-        hashtable_t *ht = (hashtable_t*)data->hashtable;
-        if (ht) {
-            struct plist_data_s sdata;
-            sdata.strval = (char*)key;
-            sdata.length = strlen(key);
-            ret = (plist_t)hash_table_lookup(ht, &sdata);
-        } else {
-            plist_t current = NULL;
-            for (current = (plist_t)node_first_child((node_t)node);
-                current;
-                current = (plist_t)node_next_sibling(node_next_sibling((node_t)current)))
-            {
-                data = plist_get_data(current);
-                assert( PLIST_KEY == plist_get_node_type(current) );
-
-                if (data && !strcmp(key, data->strval))
-                {
-                    ret = (plist_t)node_next_sibling((node_t)current);
-                    break;
-                }
+    if (!PLIST_IS_DICT(node) || !key) {
+        PLIST_ERR("invalid argument passed to %s (node=%p, key=%p)\n", __func__, node, key);
+        return NULL;
+    }
+    plist_data_t data = plist_get_data(node);
+    assert(data);
+    if (!data) {
+        PLIST_ERR("%s: invalid node\n", __func__);
+        return NULL;
+    }
+    size_t keylen = strlen(key);
+    hashtable_t *ht = (hashtable_t*)data->hashtable;
+    if (ht) {
+        struct plist_data_s sdata = { 0 };
+        sdata.strval = (char*)key;
+        sdata.length = keylen;
+        return (plist_t)hash_table_lookup(ht, &sdata);
+    } else {
+        plist_t k = NULL;
+        for (k = (plist_t)node_first_child((node_t)node); k; ) {
+            plist_t v = (plist_t)node_next_sibling(k);
+            if (!v) break;
+            data = plist_get_data(k);
+            assert(PLIST_IS_KEY(k));
+            if (!PLIST_IS_KEY(k) || !data || !data->strval) {
+                PLIST_ERR("invalid key node at %p\n", k);
+                break;
             }
+            if (data->length == keylen && !memcmp(key, data->strval, keylen+1)) {
+                ret = v;
+                break;
+            }
+            k = node_next_sibling(v);
         }
     }
     return ret;
@@ -903,44 +940,49 @@ plist_t plist_dict_get_item(plist_t node, const char* key)
 
 void plist_dict_set_item(plist_t node, const char* key, plist_t item)
 {
-    if (!item) {
+    if (!PLIST_IS_DICT(node) || !key || !item) {
+        PLIST_ERR("invalid argument passed to %s (node=%p, key=%p, item=%p)\n", __func__, node, key, item);
         return;
     }
-    if (node && PLIST_DICT == plist_get_node_type(node)) {
-        plist_t old_item = plist_dict_get_item(node, key);
-        plist_t key_node = NULL;
+    node_t it = (node_t)item;
+    if (it->parent != NULL) {
+        assert(it->parent == NULL && "item already has a parent");
+        PLIST_ERR("%s: item already has a parent\n", __func__);
+        return;
+    }
+    plist_t old_item = plist_dict_get_item(node, key);
+    plist_t key_node = NULL;
         if (old_item) {
-            int idx = plist_free_node((node_t)old_item);
-            assert(idx >= 0);
-            if (idx < 0) {
-                return;
-            }
-            node_insert((node_t)node, idx, (node_t)item);
-            key_node = node_prev_sibling((node_t)item);
-        } else {
-            key_node = plist_new_key(key);
-            node_attach((node_t)node, (node_t)key_node);
-            node_attach((node_t)node, (node_t)item);
+        int idx = plist_free_node((node_t)old_item);
+        assert(idx >= 0);
+        if (idx < 0) {
+            return;
         }
+        node_insert((node_t)node, idx, (node_t)item);
+        key_node = node_prev_sibling((node_t)item);
+    } else {
+        key_node = plist_new_key(key);
+        node_attach((node_t)node, (node_t)key_node);
+        node_attach((node_t)node, (node_t)item);
+    }
 
-        hashtable_t *ht = (hashtable_t*)((plist_data_t)((node_t)node)->data)->hashtable;
-        if (ht) {
-            /* store pointer to item in hash table */
-            hash_table_insert(ht, (plist_data_t)((node_t)key_node)->data, item);
-        } else {
-            if (((node_t)node)->count > 500) {
-                /* make new hash table */
-                ht = hash_table_new(dict_key_hash, dict_key_compare, NULL);
-                /* calculate the hashes for all entries we have so far */
-                plist_t current = NULL;
-                for (current = (plist_t)node_first_child((node_t)node);
-                     ht && current;
-                     current = (plist_t)node_next_sibling(node_next_sibling((node_t)current)))
-                {
-                    hash_table_insert(ht, ((node_t)current)->data, node_next_sibling((node_t)current));
-                }
-                ((plist_data_t)((node_t)node)->data)->hashtable = ht;
+    hashtable_t *ht = (hashtable_t*)((plist_data_t)((node_t)node)->data)->hashtable;
+    if (ht) {
+        /* store pointer to item in hash table */
+        hash_table_insert(ht, (plist_data_t)((node_t)key_node)->data, item);
+    } else {
+        if (((node_t)node)->count > 500) {
+            /* make new hash table */
+            ht = hash_table_new(dict_key_hash, dict_key_compare, NULL);
+            /* calculate the hashes for all entries we have so far */
+            plist_t current = NULL;
+            for (current = (plist_t)node_first_child((node_t)node);
+                 ht && current;
+                 current = (plist_t)node_next_sibling(node_next_sibling((node_t)current)))
+            {
+                hash_table_insert(ht, ((node_t)current)->data, node_next_sibling((node_t)current));
             }
+            ((plist_data_t)((node_t)node)->data)->hashtable = ht;
         }
     }
 }
@@ -1422,14 +1464,20 @@ int plist_data_compare(const void *a, const void *b)
     plist_data_t val_a = NULL;
     plist_data_t val_b = NULL;
 
-    if (!a || !b)
-        return FALSE;
+    if (a == b)
+        return TRUE;
 
-    if (!((node_t) a)->data || !((node_t) b)->data)
+    if (!a || !b)
         return FALSE;
 
     val_a = plist_get_data((plist_t) a);
     val_b = plist_get_data((plist_t) b);
+
+    if (val_a == NULL && val_b == NULL)
+        return TRUE;
+
+    if (val_a == NULL || val_b == NULL)
+        return FALSE;
 
     if (val_a->type != val_b->type)
         return FALSE;
@@ -1442,28 +1490,30 @@ int plist_data_compare(const void *a, const void *b)
     case PLIST_REAL:
     case PLIST_DATE:
     case PLIST_UID:
-        if (val_a->length != val_b->length)
-            return FALSE;
-        return val_a->intval == val_b->intval;	//it is an union so this is sufficient
+        return val_a->length == val_b->length
+            && val_a->intval == val_b->intval;	// it is a union so this is sufficient
 
     case PLIST_KEY:
     case PLIST_STRING:
+        if (!val_a->strval || !val_b->strval)
+            return val_a->strval == val_b->strval;
         return strcmp(val_a->strval, val_b->strval) == 0;
 
-    case PLIST_DATA:
+    case PLIST_DATA: {
         if (val_a->length != val_b->length)
             return FALSE;
+        if (val_a->length == 0)
+            return TRUE;
         return memcmp(val_a->buff, val_b->buff, val_a->length) == 0;
-
+    }
     case PLIST_ARRAY:
     case PLIST_DICT:
         //compare pointer
         return a == b;
 
     default:
-        break;
+        return FALSE;
     }
-    return FALSE;
 }
 
 char plist_compare_node_value(plist_t node_l, plist_t node_r)

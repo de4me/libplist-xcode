@@ -219,7 +219,7 @@ int main(int argc, char *argv[])
         plist_entire = malloc(sizeof(char) * read_capacity);
         if(plist_entire == NULL)
         {
-            fprintf(stderr, "ERROR: Failed to allocate buffer to read from stdin");
+            fprintf(stderr, "ERROR: Failed to allocate buffer to read from stdin\n");
             free(options);
             return 1;
         }
@@ -278,6 +278,12 @@ int main(int argc, char *argv[])
         fstat(fileno(iplist), &filestats);
 
         plist_entire = (char *) malloc(sizeof(char) * (filestats.st_size + 1));
+        if(plist_entire == NULL)
+        {
+            fprintf(stderr, "ERROR: Failed to allocate buffer to read from file\n");
+            free(options);
+            return 1;
+        }
         read_size = fread(plist_entire, sizeof(char), filestats.st_size, iplist);
         plist_entire[read_size] = '\0';
         fclose(iplist);
@@ -357,6 +363,14 @@ int main(int argc, char *argv[])
         switch (output_res) {
             case PLIST_ERR_SUCCESS:
                 break;
+            case PLIST_ERR_CIRCULAR_REF:
+                fprintf(stderr, "ERROR: Circular reference detected.\n");
+                ret = 5;
+                break;
+            case PLIST_ERR_MAX_NESTING:
+                fprintf(stderr, "ERROR: Output plist data exceeds maximum nesting depth.\n");
+                ret = 4;
+                break;
             case PLIST_ERR_FORMAT:
                 fprintf(stderr, "ERROR: Input plist data is not compatible with output format.\n");
                 ret = 2;
@@ -364,6 +378,7 @@ int main(int argc, char *argv[])
             default:
                 fprintf(stderr, "ERROR: Failed to convert plist data (%d)\n", output_res);
                 ret = 1;
+                break;
         }
     } else {
         switch (input_res) {
@@ -374,6 +389,14 @@ int main(int argc, char *argv[])
                     fprintf(stderr, "ERROR: Could not parse plist data (%d)\n", input_res);
                 }
                 ret = 3;
+                break;
+            case PLIST_ERR_CIRCULAR_REF:
+                fprintf(stderr, "ERROR: Circular reference detected in input plist data.\n");
+                ret = 5;
+                break;
+            case PLIST_ERR_MAX_NESTING:
+                fprintf(stderr, "ERROR: Input plist data exceeds maximum nesting depth.\n");
+                ret = 4;
                 break;
             default:
                 fprintf(stderr, "ERROR: Could not parse plist data (%d)\n", input_res);

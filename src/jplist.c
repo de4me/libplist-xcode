@@ -38,6 +38,7 @@
 #include "plist.h"
 #include "strbuf.h"
 #include "jsmn.h"
+#include "hashtable.h"
 
 #ifdef DEBUG
 static int plist_json_debug = 0;
@@ -315,18 +316,32 @@ static int num_digits_u(uint64_t i)
     return n;
 }
 
-static plist_err_t node_estimate_size(node_t node, uint64_t *size, uint32_t depth, int prettify)
+static plist_err_t _node_estimate_size(node_t node, uint64_t *size, uint32_t depth, int prettify, hashtable_t *visited)
 {
     plist_data_t data;
     if (!node) {
         return PLIST_ERR_INVALID_ARG;
     }
+
+    if (depth > PLIST_MAX_NESTING_DEPTH) {
+        PLIST_JSON_WRITE_ERR("maximum nesting depth (%u) exceeded\n", (unsigned)PLIST_MAX_NESTING_DEPTH);
+        return PLIST_ERR_MAX_NESTING;
+    }
+
+    if (hash_table_lookup(visited, node)) {
+        PLIST_JSON_WRITE_ERR("circular reference detected\n");
+        return PLIST_ERR_CIRCULAR_REF;
+    }
+
+    // mark as visited
+    hash_table_insert(visited, node, (void*)1);
+
     data = plist_get_data(node);
     if (node->children) {
         node_t ch;
         unsigned int n_children = node_n_children(node);
         for (ch = node_first_child(node); ch; ch = node_next_sibling(ch)) {
-            plist_err_t res = node_estimate_size(ch, size, depth + 1, prettify);
+            plist_err_t res = _node_estimate_size(ch, size, depth + 1, prettify, visited);
             if (res < 0) {
                 return res;
             }
@@ -402,6 +417,15 @@ static plist_err_t node_estimate_size(node_t node, uint64_t *size, uint32_t dept
     return PLIST_ERR_SUCCESS;
 }
 
+static plist_err_t node_estimate_size(node_t node, uint64_t *size, uint32_t depth, int prettify)
+{
+    hashtable_t *visited = hash_table_new(plist_node_ptr_hash, plist_node_ptr_compare, NULL);
+    if (!visited) return PLIST_ERR_NO_MEM;
+    plist_err_t err = _node_estimate_size(node, size, depth, prettify, visited);
+    hash_table_destroy(visited);
+    return err;
+}
+
 plist_err_t plist_to_json(plist_t plist, char **plist_json, uint32_t* length, int prettify)
 {
     uint64_t size = 0;
@@ -452,6 +476,7 @@ plist_err_t plist_to_json(plist_t plist, char **plist_json, uint32_t* length, in
 typedef struct {
     jsmntok_t* tokens;
     int count;
+    plist_err_t err;
 } jsmntok_info_t;
 
 static int64_t parse_decimal(const char* str, const char* str_end, char** endp)
@@ -679,31 +704,38 @@ static plist_t parse_string(const char* js, jsmntok_info_t* ti, int* index)
     return node;
 }
 
-static plist_t parse_object(const char* js, jsmntok_info_t* ti, int* index);
+static plist_t parse_object(const char* js, jsmntok_info_t* ti, int* index, uint32_t depth);
 
-static plist_t parse_array(const char* js, jsmntok_info_t* ti, int* index)
+static plist_t parse_array(const char* js, jsmntok_info_t* ti, int* index, uint32_t depth)
 {
     if (ti->tokens[*index].type != JSMN_ARRAY) {
         PLIST_JSON_ERR("%s: token type != JSMN_ARRAY\n", __func__);
+        ti->err = PLIST_ERR_PARSE;
+        return NULL;
+    }
+    if (depth > PLIST_MAX_NESTING_DEPTH) {
+        PLIST_JSON_ERR("%s: maximum nesting depth (%u) exceeded\n", __func__, (unsigned)PLIST_MAX_NESTING_DEPTH);
+        ti->err = PLIST_ERR_MAX_NESTING;
         return NULL;
     }
     plist_t arr = plist_new_array();
-    int num_tokens = ti->tokens[*index].size;
-    int num;
+    size_t num_tokens = ti->tokens[*index].size;
+    size_t num;
     int j = (*index)+1;
     for (num = 0; num < num_tokens; num++) {
         if (j >= ti->count) {
             PLIST_JSON_ERR("%s: token index out of valid range\n", __func__);
             plist_free(arr);
+            ti->err = PLIST_ERR_PARSE;
             return NULL;
         }
         plist_t val = NULL;
         switch (ti->tokens[j].type) {
             case JSMN_OBJECT:
-                val = parse_object(js, ti, &j);
+                val = parse_object(js, ti, &j, depth+1);
                 break;
             case JSMN_ARRAY:
-                val = parse_array(js, ti, &j);
+                val = parse_array(js, ti, &j, depth+1);
                 break;
             case JSMN_STRING:
                 val = parse_string(js, ti, &j);
@@ -718,6 +750,7 @@ static plist_t parse_array(const char* js, jsmntok_info_t* ti, int* index)
             plist_array_append_item(arr, val);
         } else {
             plist_free(arr);
+            ti->err = PLIST_ERR_PARSE;
             return NULL;
         }
     }
@@ -725,17 +758,24 @@ static plist_t parse_array(const char* js, jsmntok_info_t* ti, int* index)
     return arr;
 }
 
-static plist_t parse_object(const char* js, jsmntok_info_t* ti, int* index)
+static plist_t parse_object(const char* js, jsmntok_info_t* ti, int* index, uint32_t depth)
 {
     if (ti->tokens[*index].type != JSMN_OBJECT) {
         PLIST_JSON_ERR("%s: token type != JSMN_OBJECT\n", __func__);
+        ti->err = PLIST_ERR_PARSE;
         return NULL;
     }
-    int num_tokens = ti->tokens[*index].size;
-    int num;
+    if (depth > PLIST_MAX_NESTING_DEPTH) {
+        PLIST_JSON_ERR("%s: maximum nesting depth (%u) exceeded\n", __func__, (unsigned)PLIST_MAX_NESTING_DEPTH);
+        ti->err = PLIST_ERR_MAX_NESTING;
+        return NULL;
+    }
+    size_t num_tokens = ti->tokens[*index].size;
+    size_t num;
     int j = (*index)+1;
     if (num_tokens % 2 != 0) {
         PLIST_JSON_ERR("%s: number of children must be even\n", __func__);
+        ti->err = PLIST_ERR_PARSE;
         return NULL;
     }
     plist_t obj = plist_new_dict();
@@ -743,12 +783,14 @@ static plist_t parse_object(const char* js, jsmntok_info_t* ti, int* index)
         if (j+1 >= ti->count) {
             PLIST_JSON_ERR("%s: token index out of valid range\n", __func__);
             plist_free(obj);
+            ti->err = PLIST_ERR_PARSE;
             return NULL;
         }
         if (ti->tokens[j].type == JSMN_STRING) {
             char* key = unescape_string(js + ti->tokens[j].start, ti->tokens[j].end - ti->tokens[j].start, NULL);
             if (!key) {
                 plist_free(obj);
+                ti->err = PLIST_ERR_PARSE;
                 return NULL;
             }
             plist_t val = NULL;
@@ -756,10 +798,10 @@ static plist_t parse_object(const char* js, jsmntok_info_t* ti, int* index)
             num++;
             switch (ti->tokens[j].type) {
                 case JSMN_OBJECT:
-                    val = parse_object(js, ti, &j);
+                    val = parse_object(js, ti, &j, depth+1);
                     break;
                 case JSMN_ARRAY:
-                    val = parse_array(js, ti, &j);
+                    val = parse_array(js, ti, &j, depth+1);
                     break;
                 case JSMN_STRING:
                     val = parse_string(js, ti, &j);
@@ -775,12 +817,14 @@ static plist_t parse_object(const char* js, jsmntok_info_t* ti, int* index)
             } else {
                 free(key);
                 plist_free(obj);
+                ti->err = PLIST_ERR_PARSE;
                 return NULL;
             }
             free(key);
         } else {
             PLIST_JSON_ERR("%s: keys must be of type STRING\n", __func__);
             plist_free(obj);
+            ti->err = PLIST_ERR_PARSE;
             return NULL;
         }
     }
@@ -800,14 +844,15 @@ plist_err_t plist_from_json(const char *json, uint32_t length, plist_t * plist)
 
     jsmn_parser parser;
     jsmn_init(&parser);
-    int maxtoks = 256;
-    int curtoks = 0;
+    unsigned int maxtoks = 256;
+    unsigned int curtoks = 0;
     int r = 0;
     jsmntok_t *tokens = NULL;
 
     do {
         jsmntok_t* newtokens = (jsmntok_t*)realloc(tokens, sizeof(jsmntok_t)*maxtoks);
         if (!newtokens) {
+            free(tokens);
             PLIST_JSON_ERR("%s: Out of memory\n", __func__);
             return PLIST_ERR_NO_MEM;
         }
@@ -817,8 +862,14 @@ plist_err_t plist_from_json(const char *json, uint32_t length, plist_t * plist)
 
         r = jsmn_parse(&parser, json, length, tokens, maxtoks);
         if (r == JSMN_ERROR_NOMEM) {
+            if (maxtoks > (unsigned int)INT_MAX - 16) {
+                free(tokens);
+                return PLIST_ERR_NO_MEM;
+            }
             maxtoks+=16;
             continue;
+        } else if (r < 0) {
+            break;
         }
     } while (r == JSMN_ERROR_NOMEM);
 
@@ -835,12 +886,16 @@ plist_err_t plist_from_json(const char *json, uint32_t length, plist_t * plist)
             PLIST_JSON_ERR("%s: Incomplete JSON, more bytes expected\n", __func__);
             free(tokens);
             return PLIST_ERR_PARSE;
+        case JSMN_ERROR_LIMIT:
+            PLIST_JSON_ERR("%s: Input data too large\n", __func__);
+            free(tokens);
+            return PLIST_ERR_PARSE;
         default:
             break;
     }
 
     int startindex = 0;
-    jsmntok_info_t ti = { tokens, parser.toknext };
+    jsmntok_info_t ti = { tokens, parser.toknext, PLIST_ERR_SUCCESS };
     switch (tokens[startindex].type) {
         case JSMN_PRIMITIVE:
             *plist = parse_primitive(json, &ti, &startindex);
@@ -849,14 +904,17 @@ plist_err_t plist_from_json(const char *json, uint32_t length, plist_t * plist)
             *plist = parse_string(json, &ti, &startindex);
             break;
         case JSMN_ARRAY:
-            *plist = parse_array(json, &ti, &startindex);
+            *plist = parse_array(json, &ti, &startindex, 0);
             break;
         case JSMN_OBJECT:
-            *plist = parse_object(json, &ti, &startindex);
+            *plist = parse_object(json, &ti, &startindex, 0);
             break;
         default:
             break;
     }
     free(tokens);
+    if (!*plist) {
+        return (ti.err != PLIST_ERR_SUCCESS) ? ti.err : PLIST_ERR_PARSE;
+    }
     return PLIST_ERR_SUCCESS;
 }

@@ -37,6 +37,7 @@
 
 #include "plist.h"
 #include "strbuf.h"
+#include "hashtable.h"
 
 #ifdef DEBUG
 static int plist_ostep_debug = 0;
@@ -359,18 +360,32 @@ static int num_digits_u(uint64_t i)
     return n;
 }
 
-static plist_err_t node_estimate_size(node_t node, uint64_t *size, uint32_t depth, int prettify)
+static plist_err_t _node_estimate_size(node_t node, uint64_t *size, uint32_t depth, int prettify, hashtable_t *visited)
 {
     plist_data_t data;
     if (!node) {
         return PLIST_ERR_INVALID_ARG;
     }
+
+    if (depth > PLIST_MAX_NESTING_DEPTH) {
+        PLIST_OSTEP_WRITE_ERR("node tree is nested too deeply\n");
+        return PLIST_ERR_MAX_NESTING;
+    }
+
+    if (hash_table_lookup(visited, node)) {
+        PLIST_OSTEP_WRITE_ERR("circular reference detected\n");
+        return PLIST_ERR_CIRCULAR_REF;
+    }
+
+    // mark as visited
+    hash_table_insert(visited, node, (void*)1);
+
     data = plist_get_data(node);
     if (node->children) {
         node_t ch;
         unsigned int n_children = node_n_children(node);
         for (ch = node_first_child(node); ch; ch = node_next_sibling(ch)) {
-            plist_err_t res = node_estimate_size(ch, size, depth + 1, prettify);
+            plist_err_t res = _node_estimate_size(ch, size, depth + 1, prettify, visited);
             if (res < 0) {
                 return res;
             }
@@ -446,6 +461,15 @@ static plist_err_t node_estimate_size(node_t node, uint64_t *size, uint32_t dept
     return PLIST_ERR_SUCCESS;
 }
 
+static plist_err_t node_estimate_size(node_t node, uint64_t *size, uint32_t depth, int prettify)
+{
+    hashtable_t *visited = hash_table_new(plist_node_ptr_hash, plist_node_ptr_compare, NULL);
+    if (!visited) return PLIST_ERR_NO_MEM;
+    plist_err_t err = _node_estimate_size(node, size, depth, prettify, visited);
+    hash_table_destroy(visited);
+    return err;
+}
+
 plist_err_t plist_to_openstep(plist_t plist, char **openstep, uint32_t* length, int prettify)
 {
     uint64_t size = 0;
@@ -492,7 +516,7 @@ struct _parse_ctx {
     const char *start;
     const char *pos;
     const char *end;
-    int err;
+    plist_err_t err;
     uint32_t depth;
 };
 typedef struct _parse_ctx* parse_ctx;
@@ -549,50 +573,50 @@ static void parse_dict_data(parse_ctx ctx, plist_t dict)
         }
         key = NULL;
         ctx->err = node_from_openstep(ctx, &key);
-        if (ctx->err != 0) {
+        if (ctx->err != PLIST_ERR_SUCCESS) {
             break;
         }
         if (!PLIST_IS_STRING(key)) {
             PLIST_OSTEP_ERR("Invalid type for dictionary key at offset %ld\n", (long int)(ctx->pos - ctx->start));
-            ctx->err++;
+            ctx->err = PLIST_ERR_PARSE;
             break;
         }
         parse_skip_ws(ctx);
         if (ctx->pos >= ctx->end) {
             PLIST_OSTEP_ERR("EOF while parsing dictionary '=' delimiter at offset %ld\n", (long int)(ctx->pos - ctx->start));
-            ctx->err++;
+            ctx->err = PLIST_ERR_PARSE;
             break;
         }
         if (*ctx->pos != '=') {
             PLIST_OSTEP_ERR("Missing '=' while parsing dictionary item at offset %ld\n", (long int)(ctx->pos - ctx->start));
-            ctx->err++;
+            ctx->err = PLIST_ERR_PARSE;
             break;
         }
         ctx->pos++;
         if (ctx->pos >= ctx->end) {
             PLIST_OSTEP_ERR("EOF while parsing dictionary item at offset %ld\n", (long int)(ctx->pos - ctx->start));
-            ctx->err++;
+            ctx->err = PLIST_ERR_PARSE;
             break;
         }
         val = NULL;
         ctx->err = node_from_openstep(ctx, &val);
-        if (ctx->err != 0) {
+        if (ctx->err != PLIST_ERR_SUCCESS) {
             break;
         }
         if (!val) {
             PLIST_OSTEP_ERR("Missing value for dictionary item at offset %ld\n", (long int)(ctx->pos - ctx->start));
-            ctx->err++;
+            ctx->err = PLIST_ERR_PARSE;
             break;
         }
         parse_skip_ws(ctx);
         if (ctx->pos >= ctx->end) {
             PLIST_OSTEP_ERR("EOF while parsing dictionary item terminator ';' at offset %ld\n", (long int)(ctx->pos - ctx->start));
-            ctx->err++;
+            ctx->err = PLIST_ERR_PARSE;
             break;
         }
         if (*ctx->pos != ';') {
             PLIST_OSTEP_ERR("Missing terminating ';' while parsing dictionary item at offset %ld\n", (long int)(ctx->pos - ctx->start));
-            ctx->err++;
+            ctx->err = PLIST_ERR_PARSE;
             break;
         }
 
@@ -612,10 +636,10 @@ static plist_err_t node_from_openstep(parse_ctx ctx, plist_t *plist)
     plist_t subnode = NULL;
     const char *p = NULL;
     ctx->depth++;
-    if (ctx->depth > 1000) {
+    if (ctx->depth > PLIST_MAX_NESTING_DEPTH) {
         PLIST_OSTEP_ERR("Too many levels of recursion (%u) at offset %ld\n", ctx->depth, (long int)(ctx->pos - ctx->start));
-        ctx->err++;
-        return PLIST_ERR_PARSE;
+        ctx->err = PLIST_ERR_MAX_NESTING;
+        return ctx->err;
     }
     while (ctx->pos < ctx->end && !ctx->err) {
         parse_skip_ws(ctx);
@@ -633,12 +657,12 @@ static plist_err_t node_from_openstep(parse_ctx ctx, plist_t *plist)
             }
             if (ctx->pos >= ctx->end) {
                 PLIST_OSTEP_ERR("EOF while parsing dictionary terminator '}' at offset %ld\n", (long int)(ctx->pos - ctx->start));
-                ctx->err++;
+                ctx->err = PLIST_ERR_PARSE;
                 break;
             }
             if (*ctx->pos != '}') {
                 PLIST_OSTEP_ERR("Missing terminating '}' at offset %ld\n", (long int)(ctx->pos - ctx->start));
-                ctx->err++;
+                ctx->err = PLIST_ERR_PARSE;
                 goto err_out;
             }
             ctx->pos++;
@@ -656,11 +680,11 @@ static plist_err_t node_from_openstep(parse_ctx ctx, plist_t *plist)
                     break;
                 }
                 ctx->err = node_from_openstep(ctx, &tmp);
-                if (ctx->err != 0) {
+                if (ctx->err != PLIST_ERR_SUCCESS) {
                     break;
                 }
                 if (!tmp) {
-                    ctx->err++;
+                    ctx->err = PLIST_ERR_PARSE;
                     break;
                 }
                 plist_array_append_item(subnode, tmp);
@@ -668,7 +692,7 @@ static plist_err_t node_from_openstep(parse_ctx ctx, plist_t *plist)
                 parse_skip_ws(ctx);
                 if (ctx->pos >= ctx->end) {
                     PLIST_OSTEP_ERR("EOF while parsing array item delimiter ',' at offset %ld\n", (long int)(ctx->pos - ctx->start));
-                    ctx->err++;
+                    ctx->err = PLIST_ERR_PARSE;
                     break;
                 }
                 if (*ctx->pos != ',') {
@@ -678,17 +702,17 @@ static plist_err_t node_from_openstep(parse_ctx ctx, plist_t *plist)
             }
 	    plist_free(tmp);
 	    tmp = NULL;
-            if (ctx->err) {
+            if (ctx->err != PLIST_ERR_SUCCESS) {
                 goto err_out;
             }
             if (ctx->pos >= ctx->end) {
                 PLIST_OSTEP_ERR("EOF while parsing array terminator ')' at offset %ld\n", (long int)(ctx->pos - ctx->start));
-                ctx->err++;
+                ctx->err = PLIST_ERR_PARSE;
                 break;
             }
             if (*ctx->pos != ')') {
                 PLIST_OSTEP_ERR("Missing terminating ')' at offset %ld\n", (long int)(ctx->pos - ctx->start));
-                ctx->err++;
+                ctx->err = PLIST_ERR_PARSE;
                 goto err_out;
             }
             ctx->pos++;
@@ -703,7 +727,7 @@ static plist_err_t node_from_openstep(parse_ctx ctx, plist_t *plist)
                 parse_skip_ws(ctx);
                 if (ctx->pos >= ctx->end) {
                     PLIST_OSTEP_ERR("EOF while parsing data terminator '>' at offset %ld\n", (long int)(ctx->pos - ctx->start));
-                    ctx->err++;
+                    ctx->err = PLIST_ERR_PARSE;
                     break;
                 }
                 if (*ctx->pos == '>') {
@@ -711,19 +735,19 @@ static plist_err_t node_from_openstep(parse_ctx ctx, plist_t *plist)
                 }
                 if (!isxdigit(*ctx->pos)) {
                     PLIST_OSTEP_ERR("Invalid byte group in data at offset %ld\n", (long int)(ctx->pos - ctx->start));
-                    ctx->err++;
+                    ctx->err = PLIST_ERR_PARSE;
                     break;
                 }
                 uint8_t b = HEX_DIGIT(*ctx->pos);
                 ctx->pos++;
                 if (ctx->pos >= ctx->end) {
                     PLIST_OSTEP_ERR("Unexpected end of data at offset %ld\n", (long int)(ctx->pos - ctx->start));
-                    ctx->err++;
+                    ctx->err = PLIST_ERR_PARSE;
                     break;
                 }
                 if (!isxdigit(*ctx->pos)) {
                     PLIST_OSTEP_ERR("Invalid byte group in data at offset %ld\n", (long int)(ctx->pos - ctx->start));
-                    ctx->err++;
+                    ctx->err = PLIST_ERR_PARSE;
                     break;
                 }
                 b = (b << 4) + HEX_DIGIT(*ctx->pos);
@@ -739,14 +763,14 @@ static plist_err_t node_from_openstep(parse_ctx ctx, plist_t *plist)
                 byte_array_free(bytes);
                 plist_free_data(data);
                 PLIST_OSTEP_ERR("EOF while parsing data terminator '>' at offset %ld\n", (long int)(ctx->pos - ctx->start));
-                ctx->err++;
+                ctx->err = PLIST_ERR_PARSE;
                 goto err_out;
             }
             if (*ctx->pos != '>') {
                 byte_array_free(bytes);
                 plist_free_data(data);
                 PLIST_OSTEP_ERR("Missing terminating '>' at offset %ld\n", (long int)(ctx->pos - ctx->start));
-                ctx->err++;
+                ctx->err = PLIST_ERR_PARSE;
                 goto err_out;
             }
             ctx->pos++;
@@ -774,13 +798,13 @@ static plist_err_t node_from_openstep(parse_ctx ctx, plist_t *plist)
             if (ctx->pos >= ctx->end) {
                 plist_free_data(data);
                 PLIST_OSTEP_ERR("EOF while parsing quoted string at offset %ld\n", (long int)(ctx->pos - ctx->start));
-                ctx->err++;
+                ctx->err = PLIST_ERR_PARSE;
                 goto err_out;
             }
             if (*ctx->pos != c) {
                 plist_free_data(data);
                 PLIST_OSTEP_ERR("Missing closing quote (%c) at offset %ld\n", c, (long int)(ctx->pos - ctx->start));
-                ctx->err++;
+                ctx->err = PLIST_ERR_PARSE;
                 goto err_out;
             }
             size_t slen = ctx->pos - p;
@@ -881,7 +905,7 @@ static plist_err_t node_from_openstep(parse_ctx ctx, plist_t *plist)
             } else {
                 plist_free_data(data);
                 PLIST_OSTEP_ERR("Unexpected character when parsing unquoted string at offset %ld\n", (long int)(ctx->pos - ctx->start));
-                ctx->err++;
+                ctx->err = PLIST_ERR_PARSE;
                 break;
             }
         }
@@ -890,11 +914,11 @@ static plist_err_t node_from_openstep(parse_ctx ctx, plist_t *plist)
     ctx->depth--;
 
 err_out:
-    if (ctx->err) {
+    if (ctx->err != PLIST_ERR_SUCCESS) {
         plist_free(subnode);
         plist_free(*plist);
         *plist = NULL;
-        return PLIST_ERR_PARSE;
+        return ctx->err;
     }
     return PLIST_ERR_SUCCESS;
 }
